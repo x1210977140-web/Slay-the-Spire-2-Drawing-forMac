@@ -17,6 +17,11 @@ except Exception:
     Quartz = None
 
 try:
+    import objc
+except Exception:
+    objc = None
+
+try:
     from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
 except Exception:
     AXIsProcessTrustedWithOptions = None
@@ -116,6 +121,13 @@ class GlobalAbortListener:
         self.running = False
 
     def _run(self):
+        if objc is not None:
+            with objc.autorelease_pool():
+                self._run_with_pool()
+            return
+        self._run_with_pool()
+
+    def _run_with_pool(self):
         self.failed_reason = ""
         mask = Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
 
@@ -153,6 +165,12 @@ class GlobalAbortListener:
             self.tap = None
 
     def _event_callback(self, _proxy, event_type, event, _refcon):
+        if objc is not None:
+            with objc.autorelease_pool():
+                return self._event_callback_inner(event_type, event)
+        return self._event_callback_inner(event_type, event)
+
+    def _event_callback_inner(self, event_type, event):
         if event_type == Quartz.kCGEventKeyDown and self._is_abort_key(event):
             self.abort_event.set()
             print("[中断] 收到全局 P 键，正在停止绘制。")
@@ -303,6 +321,7 @@ class DigitalAmberOverlay:
                 "屏幕捕获受限",
                 "无法截取屏幕。\n"
                 "请在 系统设置 -> 隐私与安全性 中授予屏幕录制权限。",
+                parent=master,
             )
             self.cancel_callback()
             return
@@ -409,7 +428,7 @@ class SpirePainterMacApp:
         os.makedirs(self.output_abs, exist_ok=True)
 
         self.config_path = os.path.join(self.output_abs, CONFIG_FILE)
-        init_topmost = True
+        init_topmost = False
         init_detail = 5
         init_speed = 3
 
@@ -417,7 +436,6 @@ class SpirePainterMacApp:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     conf = json.load(f)
-                init_topmost = bool(conf.get("topmost", True))
                 init_detail = int(conf.get("detail", 5))
                 init_speed = int(conf.get("speed", 3))
             except Exception:
@@ -443,19 +461,18 @@ class SpirePainterMacApp:
         self._build_ui(init_detail, init_speed)
 
         if not check_accessibility_permission(prompt=True):
-            messagebox.showwarning(
+            self._show_warning(
                 "需要权限",
                 "鼠标控制需要辅助功能权限。\n"
                 "系统会弹出授权提示，请允许后按需重启应用。",
             )
 
-        if not self.abort_listener.start():
-            self.status_label.config(
-                text=(
-                    "全局 P 热键暂不可用。\n"
-                    "请授予输入监控 + 辅助功能权限。"
-                )
+        self.status_label.config(
+            text=(
+                "请先准备线稿。\n"
+                "开始绘制前将自动启用全局 P 急停。"
             )
+        )
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -480,7 +497,7 @@ class SpirePainterMacApp:
 
         self.chk_topmost = tk.Checkbutton(
             top_bar,
-            text="窗口置顶",
+            text="窗口置顶（本次有效）",
             variable=self.topmost_var,
             command=self.save_config,
         )
@@ -600,6 +617,30 @@ class SpirePainterMacApp:
     def set_status(self, text):
         self.root.after(0, lambda: self.status_label.config(text=text))
 
+    def _run_dialog(self, dialog_callable):
+        was_topmost = self.topmost_var.get()
+        if was_topmost:
+            self.root.attributes("-topmost", False)
+            self.root.update_idletasks()
+        try:
+            return dialog_callable()
+        finally:
+            if was_topmost and self.topmost_var.get():
+                self.root.attributes("-topmost", True)
+
+    def _show_error(self, title, message):
+        return self._run_dialog(lambda: messagebox.showerror(title, message, parent=self.root))
+
+    def _show_warning(self, title, message):
+        return self._run_dialog(lambda: messagebox.showwarning(title, message, parent=self.root))
+
+    def _show_info(self, title, message):
+        return self._run_dialog(lambda: messagebox.showinfo(title, message, parent=self.root))
+
+    def _ask_open_filename(self, **kwargs):
+        kwargs.setdefault("parent", self.root)
+        return self._run_dialog(lambda: filedialog.askopenfilename(**kwargs))
+
     def save_config(self, *_args):
         if not hasattr(self, "detail_slider") or not hasattr(self, "speed_slider"):
             return
@@ -608,7 +649,6 @@ class SpirePainterMacApp:
         self.root.attributes("-topmost", is_top)
 
         conf = {
-            "topmost": is_top,
             "detail": int(self.detail_slider.get()),
             "speed": int(self.speed_slider.get()),
         }
@@ -635,7 +675,7 @@ class SpirePainterMacApp:
         try:
             subprocess.run(["open", self.output_abs], check=False)
         except Exception as exc:
-            messagebox.showerror("错误", f"无法打开文件夹: {exc}")
+            self._show_error("错误", f"无法打开文件夹: {exc}")
 
     def update_preview_panel(self, image_path):
         if not image_path or not os.path.exists(image_path):
@@ -651,7 +691,7 @@ class SpirePainterMacApp:
             print(f"预览加载失败: {exc}")
 
     def select_image(self):
-        file_path = filedialog.askopenfilename(
+        file_path = self._ask_open_filename(
             title="选择原图片",
             filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp")],
         )
@@ -666,7 +706,7 @@ class SpirePainterMacApp:
 
         img = cv2.imdecode(np.fromfile(self.last_raw_image_path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if img is None:
-            messagebox.showerror("读取失败", "无法读取所选图片。")
+            self._show_error("读取失败", "无法读取所选图片。")
             return
 
         detail = int(self.detail_slider.get())
@@ -716,14 +756,14 @@ class SpirePainterMacApp:
     def process_text(self):
         text = self.text_input.get().strip()
         if not text:
-            messagebox.showwarning("缺少文字", "请先输入文字。")
+            self._show_warning("缺少文字", "请先输入文字。")
             return
 
         selected_font_name = self.font_combo.get()
         font_path, selected_hit = self._resolve_font_path(selected_font_name)
 
         if not font_path:
-            messagebox.showerror(
+            self._show_error(
                 "字体缺失",
                 "在 macOS 字体目录中未找到可用中文字体。",
             )
@@ -732,11 +772,11 @@ class SpirePainterMacApp:
         try:
             font = ImageFont.truetype(font_path, 150)
         except Exception as exc:
-            messagebox.showerror("字体读取错误", f"无法加载字体:\n{exc}")
+            self._show_error("字体读取错误", f"无法加载字体:\n{exc}")
             return
 
         if not selected_hit:
-            messagebox.showinfo(
+            self._show_info(
                 "字体回退",
                 "所选字体不可用。\n已自动使用后备字体。",
             )
@@ -771,7 +811,7 @@ class SpirePainterMacApp:
         self.update_preview_panel(save_path)
 
     def load_existing_lineart(self):
-        file_path = filedialog.askopenfilename(
+        file_path = self._ask_open_filename(
             initialdir=self.output_abs,
             title="选择已保存线稿",
             filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp")],
@@ -784,21 +824,21 @@ class SpirePainterMacApp:
 
     def _ensure_runtime_permissions(self):
         if Quartz is None:
-            messagebox.showerror(
+            self._show_error(
                 "缺少依赖",
                 "Quartz 框架不可用。\n请先安装 requirements 依赖。",
             )
             return False
 
         if not check_accessibility_permission(prompt=True):
-            messagebox.showerror(
+            self._show_error(
                 "需要权限",
                 "鼠标控制需要辅助功能权限。",
             )
             return False
 
         if not self.abort_listener.running and not self.abort_listener.start():
-            messagebox.showerror(
+            self._show_error(
                 "全局键盘监听不可用",
                 (
                     f"{self.abort_listener.failed_reason}\n\n"
@@ -811,7 +851,7 @@ class SpirePainterMacApp:
 
     def start_digital_amber(self):
         if not self.current_lineart_path:
-            messagebox.showwarning("缺少线稿", "请先生成或加载线稿再开始绘制。")
+            self._show_warning("缺少线稿", "请先生成或加载线稿再开始绘制。")
             return
 
         if not self._ensure_runtime_permissions():

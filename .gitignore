@@ -1,0 +1,10 @@
+# Ignore everything by default
+*
+
+# Keep only core project files
+!.gitignore
+!LICENSE
+!README.md
+!requirements.txt
+!build_mac.sh
+!spire_painter_mac.py
