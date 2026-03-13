@@ -11,21 +11,12 @@ from PIL import Image, ImageTk, ImageGrab, ImageDraw, ImageFont, ImageEnhance
 import cv2
 import numpy as np
 
-try:
-    import Quartz
-except Exception:
-    Quartz = None
-
-try:
-    import objc
-except Exception:
-    objc = None
-
-try:
-    from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
-except Exception:
-    AXIsProcessTrustedWithOptions = None
-    kAXTrustedCheckOptionPrompt = None
+Quartz = None
+objc = None
+AXIsProcessTrustedWithOptions = None
+AXIsProcessTrusted = None
+kAXTrustedCheckOptionPrompt = None
+_mac_api_loaded = False
 
 
 OUTPUT_DIR = "output_lines"
@@ -36,16 +27,60 @@ MIN_SELECT_SIZE = 10
 # -----------------------------------------------------------------------------
 # Permission and input helpers
 # -----------------------------------------------------------------------------
-def check_accessibility_permission(prompt):
-    if AXIsProcessTrustedWithOptions is None or kAXTrustedCheckOptionPrompt is None:
-        return False
+def load_macos_apis():
+    global Quartz
+    global objc
+    global AXIsProcessTrustedWithOptions
+    global AXIsProcessTrusted
+    global kAXTrustedCheckOptionPrompt
+    global _mac_api_loaded
+
+    if _mac_api_loaded:
+        return
+
     try:
-        return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: bool(prompt)}))
+        import Quartz as _Quartz
+        Quartz = _Quartz
+    except Exception:
+        Quartz = None
+
+    try:
+        import objc as _objc
+        objc = _objc
+    except Exception:
+        objc = None
+
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions as _AXIsProcessTrustedWithOptions
+        from ApplicationServices import AXIsProcessTrusted as _AXIsProcessTrusted
+        from ApplicationServices import kAXTrustedCheckOptionPrompt as _kAXTrustedCheckOptionPrompt
+        AXIsProcessTrustedWithOptions = _AXIsProcessTrustedWithOptions
+        AXIsProcessTrusted = _AXIsProcessTrusted
+        kAXTrustedCheckOptionPrompt = _kAXTrustedCheckOptionPrompt
+    except Exception:
+        AXIsProcessTrustedWithOptions = None
+        AXIsProcessTrusted = None
+        kAXTrustedCheckOptionPrompt = None
+
+    _mac_api_loaded = True
+
+
+def check_accessibility_permission(prompt):
+    load_macos_apis()
+    try:
+        if prompt and AXIsProcessTrustedWithOptions is not None and kAXTrustedCheckOptionPrompt is not None:
+            return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+        if AXIsProcessTrusted is not None:
+            return bool(AXIsProcessTrusted())
+        if AXIsProcessTrustedWithOptions is not None and kAXTrustedCheckOptionPrompt is not None:
+            return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False}))
+        return False
     except Exception:
         return False
 
 
 def _post_mouse_event(event_type, x, y, button):
+    load_macos_apis()
     if Quartz is None:
         return
     event = Quartz.CGEventCreateMouseEvent(None, event_type, (float(x), float(y)), button)
@@ -99,6 +134,7 @@ class GlobalAbortListener:
         self.failed_reason = ""
 
     def start(self):
+        load_macos_apis()
         if self.running:
             return True
         if Quartz is None:
@@ -112,6 +148,7 @@ class GlobalAbortListener:
         return self.running
 
     def stop(self):
+        load_macos_apis()
         if Quartz is None:
             return
         if self.run_loop is not None:
@@ -121,6 +158,7 @@ class GlobalAbortListener:
         self.running = False
 
     def _run(self):
+        load_macos_apis()
         if objc is not None:
             with objc.autorelease_pool():
                 self._run_with_pool()
@@ -460,17 +498,10 @@ class SpirePainterMacApp:
 
         self._build_ui(init_detail, init_speed)
 
-        if not check_accessibility_permission(prompt=True):
-            self._show_warning(
-                "需要权限",
-                "鼠标控制需要辅助功能权限。\n"
-                "系统会弹出授权提示，请允许后按需重启应用。",
-            )
-
         self.status_label.config(
             text=(
                 "请先准备线稿。\n"
-                "开始绘制前将自动启用全局 P 急停。"
+                "开始绘制时将检查并提示权限。"
             )
         )
 
